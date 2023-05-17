@@ -8,7 +8,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>qcfractal.snowflake &#8212; QCArchive 0.0.99.post3831+g50f68399 documentation</title>
+    <title>qcfractal.snowflake &#8212; QCArchive 0.0.99.post3898+g29c69851 documentation</title>
   
   
   
@@ -30,7 +30,7 @@
 
     <link rel="stylesheet" type="text/css" href="../../_static/pygments.css" />
     <link rel="stylesheet" type="text/css" href="../../_static/autodoc_pydantic.css" />
-    <link rel="stylesheet" type="text/css" href="../../_static/design-style.4045f2051d55cab465a707391d5b2007.min.css" />
+    <link rel="stylesheet" type="text/css" href="../../_static/design-style.1e8bd061cd6da7fc9cf755528e8ffc24.min.css" />
     <link rel="stylesheet" type="text/css" href="../../_static/css/custom.css" />
   
   <!-- Pre-loaded scripts that we'll load fully later -->
@@ -38,9 +38,6 @@
 <link rel="preload" as="script" href="../../_static/scripts/pydata-sphinx-theme.js?digest=e353d410970836974a52" />
 
     <script data-url_root="../../" id="documentation_options" src="../../_static/documentation_options.js"></script>
-    <script src="../../_static/jquery.js"></script>
-    <script src="../../_static/underscore.js"></script>
-    <script src="../../_static/_sphinx_javascript_frameworks_compat.js"></script>
     <script src="../../_static/doctools.js"></script>
     <script src="../../_static/sphinx_highlight.js"></script>
     <script src="../../_static/design-tabs.js"></script>
@@ -424,55 +421,94 @@ document.write(`
 <span class="kn">import</span> <span class="nn">os</span>
 <span class="kn">import</span> <span class="nn">secrets</span>
 <span class="kn">import</span> <span class="nn">tempfile</span>
+<span class="kn">import</span> <span class="nn">threading</span>
 <span class="kn">import</span> <span class="nn">time</span>
 <span class="kn">import</span> <span class="nn">weakref</span>
-<span class="kn">from</span> <span class="nn">multiprocessing.pool</span> <span class="kn">import</span> <span class="n">Pool</span>
 <span class="kn">from</span> <span class="nn">queue</span> <span class="kn">import</span> <span class="n">Empty</span>  <span class="c1"># Just for exception handling</span>
 <span class="kn">from</span> <span class="nn">typing</span> <span class="kn">import</span> <span class="n">TYPE_CHECKING</span>
 
 <span class="kn">import</span> <span class="nn">requests</span>
 
-<span class="kn">from</span> <span class="nn">qcfractalcompute</span> <span class="kn">import</span> <span class="n">ComputeManager</span><span class="p">,</span> <span class="n">_initialize_signals_process_pool</span>
+<span class="kn">from</span> <span class="nn">qcfractalcompute.compute_manager</span> <span class="kn">import</span> <span class="n">ComputeManager</span>
+<span class="kn">from</span> <span class="nn">qcfractalcompute.config</span> <span class="kn">import</span> <span class="n">FractalComputeConfig</span><span class="p">,</span> <span class="n">FractalServerSettings</span><span class="p">,</span> <span class="n">LocalExecutorConfig</span>
 <span class="kn">from</span> <span class="nn">qcportal</span> <span class="kn">import</span> <span class="n">PortalClient</span>
 <span class="kn">from</span> <span class="nn">qcportal.record_models</span> <span class="kn">import</span> <span class="n">RecordStatusEnum</span>
 <span class="kn">from</span> <span class="nn">.config</span> <span class="kn">import</span> <span class="n">FractalConfig</span><span class="p">,</span> <span class="n">DatabaseConfig</span><span class="p">,</span> <span class="n">update_nested_dict</span>
-<span class="kn">from</span> <span class="nn">.flask_app.flask_app</span> <span class="kn">import</span> <span class="n">FlaskProcess</span>
-<span class="kn">from</span> <span class="nn">.job_runner</span> <span class="kn">import</span> <span class="n">FractalJobRunnerProcess</span>
+<span class="kn">from</span> <span class="nn">.flask_app.gunicorn_app</span> <span class="kn">import</span> <span class="n">FractalGunicornApp</span>
+<span class="kn">from</span> <span class="nn">.job_runner</span> <span class="kn">import</span> <span class="n">FractalJobRunner</span>
 <span class="kn">from</span> <span class="nn">.port_util</span> <span class="kn">import</span> <span class="n">find_open_port</span>
 <span class="kn">from</span> <span class="nn">.postgres_harness</span> <span class="kn">import</span> <span class="n">TemporaryPostgres</span>
-<span class="kn">from</span> <span class="nn">.process_runner</span> <span class="kn">import</span> <span class="n">ProcessBase</span><span class="p">,</span> <span class="n">ProcessRunner</span>
 
 <span class="k">if</span> <span class="n">TYPE_CHECKING</span><span class="p">:</span>
     <span class="kn">from</span> <span class="nn">typing</span> <span class="kn">import</span> <span class="n">Dict</span><span class="p">,</span> <span class="n">Any</span><span class="p">,</span> <span class="n">Sequence</span><span class="p">,</span> <span class="n">Optional</span><span class="p">,</span> <span class="n">Set</span>
 
 
-<span class="k">class</span> <span class="nc">SnowflakeComputeProcess</span><span class="p">(</span><span class="n">ProcessBase</span><span class="p">):</span>
-<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
-<span class="sd">    Runs  a compute manager in a separate process</span>
-<span class="sd">    &quot;&quot;&quot;</span>
+<span class="k">def</span> <span class="nf">_api_process</span><span class="p">(</span>
+    <span class="n">qcf_config</span><span class="p">:</span> <span class="n">FractalConfig</span><span class="p">,</span>
+    <span class="n">logging_queue</span><span class="p">:</span> <span class="n">multiprocessing</span><span class="o">.</span><span class="n">Queue</span><span class="p">,</span>
+    <span class="n">finished_queue</span><span class="p">:</span> <span class="n">multiprocessing</span><span class="o">.</span><span class="n">Queue</span><span class="p">,</span>
+    <span class="n">started_event</span><span class="p">:</span> <span class="n">multiprocessing</span><span class="o">.</span><span class="n">Event</span><span class="p">,</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
 
-    <span class="k">def</span> <span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">qcf_config</span><span class="p">:</span> <span class="n">FractalConfig</span><span class="p">,</span> <span class="n">compute_workers</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">2</span><span class="p">):</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">_qcf_config</span> <span class="o">=</span> <span class="n">qcf_config</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">_compute_workers</span> <span class="o">=</span> <span class="n">compute_workers</span>
+    <span class="n">qh</span> <span class="o">=</span> <span class="n">logging</span><span class="o">.</span><span class="n">handlers</span><span class="o">.</span><span class="n">QueueHandler</span><span class="p">(</span><span class="n">logging_queue</span><span class="p">)</span>
+    <span class="n">logger</span> <span class="o">=</span> <span class="n">logging</span><span class="o">.</span><span class="n">getLogger</span><span class="p">()</span>
+    <span class="n">logger</span><span class="o">.</span><span class="n">handlers</span><span class="o">.</span><span class="n">clear</span><span class="p">()</span>
+    <span class="n">logger</span><span class="o">.</span><span class="n">addHandler</span><span class="p">(</span><span class="n">qh</span><span class="p">)</span>
 
-        <span class="c1"># Don&#39;t initialize the worker pool here. It must be done in setup(), because</span>
-        <span class="c1"># that is run in the separate process</span>
+    <span class="n">api</span> <span class="o">=</span> <span class="n">FractalGunicornApp</span><span class="p">(</span><span class="n">qcf_config</span><span class="p">,</span> <span class="n">finished_queue</span><span class="p">,</span> <span class="n">started_event</span><span class="p">)</span>
+    <span class="n">api</span><span class="o">.</span><span class="n">run</span><span class="p">()</span>
 
-    <span class="k">def</span> <span class="nf">setup</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
-        <span class="n">host</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_qcf_config</span><span class="o">.</span><span class="n">api</span><span class="o">.</span><span class="n">host</span>
-        <span class="n">port</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_qcf_config</span><span class="o">.</span><span class="n">api</span><span class="o">.</span><span class="n">port</span>
-        <span class="n">uri</span> <span class="o">=</span> <span class="sa">f</span><span class="s2">&quot;http://</span><span class="si">{</span><span class="n">host</span><span class="si">}</span><span class="s2">:</span><span class="si">{</span><span class="n">port</span><span class="si">}</span><span class="s2">&quot;</span>
 
-        <span class="bp">self</span><span class="o">.</span><span class="n">_worker_pool</span> <span class="o">=</span> <span class="n">Pool</span><span class="p">(</span><span class="n">processes</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">_compute_workers</span><span class="p">,</span> <span class="n">initializer</span><span class="o">=</span><span class="n">_initialize_signals_process_pool</span><span class="p">)</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">_queue_manager</span> <span class="o">=</span> <span class="n">ComputeManager</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_worker_pool</span><span class="p">,</span> <span class="n">fractal_uri</span><span class="o">=</span><span class="n">uri</span><span class="p">,</span> <span class="n">manager_name</span><span class="o">=</span><span class="s2">&quot;snowflake_compute&quot;</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">_compute_process</span><span class="p">(</span><span class="n">compute_config</span><span class="p">:</span> <span class="n">FractalComputeConfig</span><span class="p">,</span> <span class="n">logging_queue</span><span class="p">:</span> <span class="n">multiprocessing</span><span class="o">.</span><span class="n">Queue</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
 
-    <span class="k">def</span> <span class="nf">run</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">_queue_manager</span><span class="o">.</span><span class="n">start</span><span class="p">()</span>
+    <span class="kn">import</span> <span class="nn">signal</span>
 
-    <span class="k">def</span> <span class="nf">interrupt</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">_queue_manager</span><span class="o">.</span><span class="n">stop</span><span class="p">()</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">_worker_pool</span><span class="o">.</span><span class="n">terminate</span><span class="p">()</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">_worker_pool</span><span class="o">.</span><span class="n">join</span><span class="p">()</span>
+    <span class="n">qh</span> <span class="o">=</span> <span class="n">logging</span><span class="o">.</span><span class="n">handlers</span><span class="o">.</span><span class="n">QueueHandler</span><span class="p">(</span><span class="n">logging_queue</span><span class="p">)</span>
+    <span class="n">logger</span> <span class="o">=</span> <span class="n">logging</span><span class="o">.</span><span class="n">getLogger</span><span class="p">()</span>
+    <span class="n">logger</span><span class="o">.</span><span class="n">handlers</span><span class="o">.</span><span class="n">clear</span><span class="p">()</span>
+    <span class="n">logger</span><span class="o">.</span><span class="n">addHandler</span><span class="p">(</span><span class="n">qh</span><span class="p">)</span>
+
+    <span class="n">compute</span> <span class="o">=</span> <span class="n">ComputeManager</span><span class="p">(</span><span class="n">compute_config</span><span class="p">)</span>
+
+    <span class="k">def</span> <span class="nf">signal_handler</span><span class="p">(</span><span class="n">signum</span><span class="p">,</span> <span class="n">frame</span><span class="p">):</span>
+        <span class="n">compute</span><span class="o">.</span><span class="n">stop</span><span class="p">()</span>
+
+    <span class="n">signal</span><span class="o">.</span><span class="n">signal</span><span class="p">(</span><span class="n">signal</span><span class="o">.</span><span class="n">SIGINT</span><span class="p">,</span> <span class="n">signal_handler</span><span class="p">)</span>
+    <span class="n">signal</span><span class="o">.</span><span class="n">signal</span><span class="p">(</span><span class="n">signal</span><span class="o">.</span><span class="n">SIGTERM</span><span class="p">,</span> <span class="n">signal_handler</span><span class="p">)</span>
+
+    <span class="n">compute</span><span class="o">.</span><span class="n">start</span><span class="p">()</span>
+
+
+<span class="k">def</span> <span class="nf">_job_runner_process</span><span class="p">(</span>
+    <span class="n">qcf_config</span><span class="p">:</span> <span class="n">FractalConfig</span><span class="p">,</span> <span class="n">logging_queue</span><span class="p">:</span> <span class="n">multiprocessing</span><span class="o">.</span><span class="n">Queue</span><span class="p">,</span> <span class="n">finished_queue</span><span class="p">:</span> <span class="n">multiprocessing</span><span class="o">.</span><span class="n">Queue</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+
+    <span class="kn">import</span> <span class="nn">signal</span>
+
+    <span class="n">qh</span> <span class="o">=</span> <span class="n">logging</span><span class="o">.</span><span class="n">handlers</span><span class="o">.</span><span class="n">QueueHandler</span><span class="p">(</span><span class="n">logging_queue</span><span class="p">)</span>
+    <span class="n">logger</span> <span class="o">=</span> <span class="n">logging</span><span class="o">.</span><span class="n">getLogger</span><span class="p">()</span>
+    <span class="n">logger</span><span class="o">.</span><span class="n">handlers</span><span class="o">.</span><span class="n">clear</span><span class="p">()</span>
+    <span class="n">logger</span><span class="o">.</span><span class="n">addHandler</span><span class="p">(</span><span class="n">qh</span><span class="p">)</span>
+
+    <span class="n">job_runner</span> <span class="o">=</span> <span class="n">FractalJobRunner</span><span class="p">(</span><span class="n">qcf_config</span><span class="p">,</span> <span class="n">finished_queue</span><span class="p">)</span>
+
+    <span class="k">def</span> <span class="nf">signal_handler</span><span class="p">(</span><span class="n">signum</span><span class="p">,</span> <span class="n">frame</span><span class="p">):</span>
+        <span class="n">job_runner</span><span class="o">.</span><span class="n">stop</span><span class="p">()</span>
+
+    <span class="n">signal</span><span class="o">.</span><span class="n">signal</span><span class="p">(</span><span class="n">signal</span><span class="o">.</span><span class="n">SIGINT</span><span class="p">,</span> <span class="n">signal_handler</span><span class="p">)</span>
+    <span class="n">signal</span><span class="o">.</span><span class="n">signal</span><span class="p">(</span><span class="n">signal</span><span class="o">.</span><span class="n">SIGTERM</span><span class="p">,</span> <span class="n">signal_handler</span><span class="p">)</span>
+
+    <span class="n">job_runner</span><span class="o">.</span><span class="n">start</span><span class="p">()</span>
+
+
+<span class="k">def</span> <span class="nf">_logging_thread</span><span class="p">(</span><span class="n">logging_queue</span><span class="p">):</span>
+    <span class="k">while</span> <span class="kc">True</span><span class="p">:</span>
+        <span class="n">record</span> <span class="o">=</span> <span class="n">logging_queue</span><span class="o">.</span><span class="n">get</span><span class="p">()</span>
+        <span class="k">if</span> <span class="n">record</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">break</span>
+        <span class="n">logger</span> <span class="o">=</span> <span class="n">logging</span><span class="o">.</span><span class="n">getLogger</span><span class="p">(</span><span class="n">record</span><span class="o">.</span><span class="n">name</span><span class="p">)</span>
+
+        <span class="n">logger</span><span class="o">.</span><span class="n">handle</span><span class="p">(</span><span class="n">record</span><span class="p">)</span>
 
 
 <div class="viewcode-block" id="FractalSnowflake"><a class="viewcode-back" href="../../overview/snowflake.html#qcfractal.snowflake.FractalSnowflake">[docs]</a><span class="k">class</span> <span class="nc">FractalSnowflake</span><span class="p">:</span>
@@ -480,7 +516,6 @@ document.write(`
         <span class="bp">self</span><span class="p">,</span>
         <span class="n">start</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span><span class="p">,</span>
         <span class="n">compute_workers</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">2</span><span class="p">,</span>
-        <span class="n">enable_watching</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span><span class="p">,</span>
         <span class="n">database_config</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">DatabaseConfig</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
         <span class="n">extra_config</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
     <span class="p">):</span>
@@ -494,13 +529,30 @@ document.write(`
 <span class="sd">        This can also be used as a context manager (`with FractalSnowflake(...) as s:`)</span>
 <span class="sd">        &quot;&quot;&quot;</span>
 
+        <span class="c1"># Multiprocessing context - generally use fork</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_mp_context</span> <span class="o">=</span> <span class="n">multiprocessing</span><span class="o">.</span><span class="n">get_context</span><span class="p">(</span><span class="s2">&quot;fork&quot;</span><span class="p">)</span>
+
         <span class="bp">self</span><span class="o">.</span><span class="n">_logger</span> <span class="o">=</span> <span class="n">logging</span><span class="o">.</span><span class="n">getLogger</span><span class="p">(</span><span class="s2">&quot;fractal_snowflake&quot;</span><span class="p">)</span>
+
+        <span class="c1"># Configure logging</span>
+        <span class="c1"># We receive log entries from various processes via a queue</span>
+        <span class="c1"># See https://docs.python.org/3/howto/logging-cookbook.html#logging-to-a-single-file-from-multiple-processes</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">_logging_queue</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_mp_context</span><span class="o">.</span><span class="n">Queue</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_logging_thread</span> <span class="o">=</span> <span class="n">threading</span><span class="o">.</span><span class="n">Thread</span><span class="p">(</span><span class="n">target</span><span class="o">=</span><span class="n">_logging_thread</span><span class="p">,</span> <span class="n">args</span><span class="o">=</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_logging_queue</span><span class="p">,),</span> <span class="n">daemon</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_logging_thread</span><span class="o">.</span><span class="n">start</span><span class="p">()</span>
 
         <span class="c1"># Create a temporary directory for everything</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_tmpdir</span> <span class="o">=</span> <span class="n">tempfile</span><span class="o">.</span><span class="n">TemporaryDirectory</span><span class="p">()</span>
 
         <span class="c1"># db is in a subdir of that</span>
         <span class="n">db_dir</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_tmpdir</span><span class="o">.</span><span class="n">name</span><span class="p">,</span> <span class="s2">&quot;db&quot;</span><span class="p">)</span>
+
+        <span class="c1"># also parsl run directory and scratch directories</span>
+        <span class="n">parsl_run_dir</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_tmpdir</span><span class="o">.</span><span class="n">name</span><span class="p">,</span> <span class="s2">&quot;parsl_run_dir&quot;</span><span class="p">)</span>
+        <span class="n">compute_scratch_dir</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_tmpdir</span><span class="o">.</span><span class="n">name</span><span class="p">,</span> <span class="s2">&quot;compute_scratch_dir&quot;</span><span class="p">)</span>
+        <span class="n">os</span><span class="o">.</span><span class="n">makedirs</span><span class="p">(</span><span class="n">parsl_run_dir</span><span class="p">,</span> <span class="n">exist_ok</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+        <span class="n">os</span><span class="o">.</span><span class="n">makedirs</span><span class="p">(</span><span class="n">compute_scratch_dir</span><span class="p">,</span> <span class="n">exist_ok</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
 
         <span class="k">if</span> <span class="n">database_config</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
             <span class="c1"># Make this part of the class so it is kept alive</span>
@@ -524,58 +576,138 @@ document.write(`
         <span class="n">qcf_cfg</span><span class="p">[</span><span class="s2">&quot;base_folder&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_tmpdir</span><span class="o">.</span><span class="n">name</span>
         <span class="n">qcf_cfg</span><span class="p">[</span><span class="s2">&quot;loglevel&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">logging</span><span class="o">.</span><span class="n">getLevelName</span><span class="p">(</span><span class="n">loglevel</span><span class="p">)</span>
         <span class="n">qcf_cfg</span><span class="p">[</span><span class="s2">&quot;database&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">db_config</span><span class="o">.</span><span class="n">dict</span><span class="p">()</span>
+        <span class="n">qcf_cfg</span><span class="p">[</span><span class="s2">&quot;enable_security&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="kc">False</span>
+        <span class="n">qcf_cfg</span><span class="p">[</span><span class="s2">&quot;hide_internal_errors&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="kc">False</span>
+        <span class="n">qcf_cfg</span><span class="p">[</span><span class="s2">&quot;service_frequency&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="mi">10</span>
+        <span class="n">qcf_cfg</span><span class="p">[</span><span class="s2">&quot;heartbeat_frequency&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="mi">5</span>
+        <span class="n">qcf_cfg</span><span class="p">[</span><span class="s2">&quot;heartbeat_max_missed&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="mi">3</span>
         <span class="n">qcf_cfg</span><span class="p">[</span><span class="s2">&quot;api&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="p">{</span>
             <span class="s2">&quot;host&quot;</span><span class="p">:</span> <span class="n">fractal_host</span><span class="p">,</span>
             <span class="s2">&quot;port&quot;</span><span class="p">:</span> <span class="n">fractal_port</span><span class="p">,</span>
             <span class="s2">&quot;secret_key&quot;</span><span class="p">:</span> <span class="n">secrets</span><span class="o">.</span><span class="n">token_urlsafe</span><span class="p">(</span><span class="mi">32</span><span class="p">),</span>
             <span class="s2">&quot;jwt_secret_key&quot;</span><span class="p">:</span> <span class="n">secrets</span><span class="o">.</span><span class="n">token_urlsafe</span><span class="p">(</span><span class="mi">32</span><span class="p">),</span>
         <span class="p">}</span>
-        <span class="n">qcf_cfg</span><span class="p">[</span><span class="s2">&quot;enable_security&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="kc">False</span>
-        <span class="n">qcf_cfg</span><span class="p">[</span><span class="s2">&quot;hide_internal_errors&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="kc">False</span>
-        <span class="n">qcf_cfg</span><span class="p">[</span><span class="s2">&quot;service_frequency&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="mi">10</span>
 
         <span class="c1"># Add in any options passed to this Snowflake</span>
         <span class="k">if</span> <span class="n">extra_config</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
             <span class="n">update_nested_dict</span><span class="p">(</span><span class="n">qcf_cfg</span><span class="p">,</span> <span class="n">extra_config</span><span class="p">)</span>
 
         <span class="bp">self</span><span class="o">.</span><span class="n">_qcf_config</span> <span class="o">=</span> <span class="n">FractalConfig</span><span class="p">(</span><span class="o">**</span><span class="n">qcf_cfg</span><span class="p">)</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">_compute_workers</span> <span class="o">=</span> <span class="n">compute_workers</span>
-
-        <span class="c1"># Do we want to enable watching/waiting for finished tasks?</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">_finished_queue</span> <span class="o">=</span> <span class="kc">None</span>
-        <span class="k">if</span> <span class="n">enable_watching</span><span class="p">:</span>
-            <span class="c1"># We use fork inside ProcessRunner, so we must use for here to set up the Queues</span>
-            <span class="c1"># This must be changed if the ProcessRunner is ever changed to use seomthing else</span>
-            <span class="n">mp_ctx</span> <span class="o">=</span> <span class="n">multiprocessing</span><span class="o">.</span><span class="n">get_context</span><span class="p">(</span><span class="s2">&quot;fork&quot;</span><span class="p">)</span>
-            <span class="bp">self</span><span class="o">.</span><span class="n">_finished_queue</span> <span class="o">=</span> <span class="n">mp_ctx</span><span class="o">.</span><span class="n">Queue</span><span class="p">()</span>
-            <span class="bp">self</span><span class="o">.</span><span class="n">_all_completed</span><span class="p">:</span> <span class="n">Set</span><span class="p">[</span><span class="nb">int</span><span class="p">]</span> <span class="o">=</span> <span class="nb">set</span><span class="p">()</span>
 
         <span class="c1">######################################</span>
-        <span class="c1"># Now start the various subprocesses #</span>
+        <span class="c1"># Set up the various components      #</span>
         <span class="c1">######################################</span>
-        <span class="c1"># For notification that flask is now ready to accept connections</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">_flask_started</span> <span class="o">=</span> <span class="n">multiprocessing</span><span class="o">.</span><span class="n">Event</span><span class="p">()</span>
-        <span class="n">flask</span> <span class="o">=</span> <span class="n">FlaskProcess</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_qcf_config</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_finished_queue</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_flask_started</span><span class="p">)</span>
 
-        <span class="n">job_runner</span> <span class="o">=</span> <span class="n">FractalJobRunnerProcess</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_qcf_config</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_finished_queue</span><span class="p">)</span>
+        <span class="c1"># For Flask</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_api_started</span> <span class="o">=</span> <span class="n">multiprocessing</span><span class="o">.</span><span class="n">Event</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_finished_queue</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_mp_context</span><span class="o">.</span><span class="n">Queue</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_all_completed</span><span class="p">:</span> <span class="n">Set</span><span class="p">[</span><span class="nb">int</span><span class="p">]</span> <span class="o">=</span> <span class="nb">set</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_api_proc</span> <span class="o">=</span> <span class="kc">None</span>
 
-        <span class="c1"># Don&#39;t auto start here. we will handle it later</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">_flask_proc</span> <span class="o">=</span> <span class="n">ProcessRunner</span><span class="p">(</span><span class="s2">&quot;snowflake_flask&quot;</span><span class="p">,</span> <span class="n">flask</span><span class="p">,</span> <span class="kc">False</span><span class="p">)</span>
+        <span class="c1"># For the compute manager</span>
+        <span class="n">uri</span> <span class="o">=</span> <span class="sa">f</span><span class="s2">&quot;http://</span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">_qcf_config</span><span class="o">.</span><span class="n">api</span><span class="o">.</span><span class="n">host</span><span class="si">}</span><span class="s2">:</span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">_qcf_config</span><span class="o">.</span><span class="n">api</span><span class="o">.</span><span class="n">port</span><span class="si">}</span><span class="s2">&quot;</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_compute_config</span> <span class="o">=</span> <span class="n">FractalComputeConfig</span><span class="p">(</span>
+            <span class="n">base_folder</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">_tmpdir</span><span class="o">.</span><span class="n">name</span><span class="p">,</span>
+            <span class="n">parsl_run_dir</span><span class="o">=</span><span class="n">parsl_run_dir</span><span class="p">,</span>
+            <span class="n">cluster</span><span class="o">=</span><span class="s2">&quot;snowflake_compute&quot;</span><span class="p">,</span>
+            <span class="n">update_frequency</span><span class="o">=</span><span class="mi">5</span><span class="p">,</span>
+            <span class="n">server</span><span class="o">=</span><span class="n">FractalServerSettings</span><span class="p">(</span>
+                <span class="n">fractal_uri</span><span class="o">=</span><span class="n">uri</span><span class="p">,</span>
+                <span class="n">verify</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+            <span class="p">),</span>
+            <span class="n">executors</span><span class="o">=</span><span class="p">{</span>
+                <span class="s2">&quot;local&quot;</span><span class="p">:</span> <span class="n">LocalExecutorConfig</span><span class="p">(</span>
+                    <span class="n">cores_per_worker</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span>
+                    <span class="n">memory_per_worker</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span>
+                    <span class="n">max_workers</span><span class="o">=</span><span class="n">compute_workers</span><span class="p">,</span>
+                    <span class="n">queue_tags</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;*&quot;</span><span class="p">],</span>
+                    <span class="n">scratch_directory</span><span class="o">=</span><span class="n">compute_scratch_dir</span><span class="p">,</span>
+                <span class="p">)</span>
+            <span class="p">},</span>
+        <span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_compute_enabled</span> <span class="o">=</span> <span class="n">compute_workers</span> <span class="o">&gt;</span> <span class="mi">0</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_compute_proc</span> <span class="o">=</span> <span class="kc">None</span>
 
-        <span class="bp">self</span><span class="o">.</span><span class="n">_job_runner_proc</span> <span class="o">=</span> <span class="n">ProcessRunner</span><span class="p">(</span><span class="s2">&quot;snowflake_job_runner&quot;</span><span class="p">,</span> <span class="n">job_runner</span><span class="p">,</span> <span class="kc">False</span><span class="p">)</span>
+        <span class="c1"># Job runner</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_job_runner_proc</span> <span class="o">=</span> <span class="kc">None</span>
 
-        <span class="n">compute</span> <span class="o">=</span> <span class="n">SnowflakeComputeProcess</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_qcf_config</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_compute_workers</span><span class="p">)</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">_compute_proc</span> <span class="o">=</span> <span class="n">ProcessRunner</span><span class="p">(</span><span class="s2">&quot;snowflake_compute&quot;</span><span class="p">,</span> <span class="n">compute</span><span class="p">,</span> <span class="kc">False</span><span class="p">)</span>
+        <span class="c1"># This is updated when starting components</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_finalizer</span> <span class="o">=</span> <span class="kc">None</span>
+
+        <span class="c1"># Update now because of the logging thread</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_update_finalizer</span><span class="p">()</span>
 
         <span class="k">if</span> <span class="n">start</span><span class="p">:</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">start</span><span class="p">()</span>
 
+    <span class="k">def</span> <span class="nf">_update_finalizer</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_finalizer</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_finalizer</span><span class="o">.</span><span class="n">detach</span><span class="p">()</span>
+
         <span class="bp">self</span><span class="o">.</span><span class="n">_finalizer</span> <span class="o">=</span> <span class="n">weakref</span><span class="o">.</span><span class="n">finalize</span><span class="p">(</span>
-            <span class="bp">self</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_stop</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_compute_proc</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_flask_proc</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_job_runner_proc</span>
+            <span class="bp">self</span><span class="p">,</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_stop</span><span class="p">,</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_compute_proc</span><span class="p">,</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_api_proc</span><span class="p">,</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_job_runner_proc</span><span class="p">,</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_logging_thread</span><span class="p">,</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_logging_queue</span><span class="p">,</span>
         <span class="p">)</span>
 
+    <span class="k">def</span> <span class="nf">_start_api</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_api_proc</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_api_proc</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_mp_context</span><span class="o">.</span><span class="n">Process</span><span class="p">(</span>
+                <span class="n">target</span><span class="o">=</span><span class="n">_api_process</span><span class="p">,</span>
+                <span class="n">args</span><span class="o">=</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_qcf_config</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_logging_queue</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_finished_queue</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_api_started</span><span class="p">),</span>
+            <span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_api_proc</span><span class="o">.</span><span class="n">start</span><span class="p">()</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">_update_finalizer</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">wait_for_api</span><span class="p">()</span>
+
+    <span class="k">def</span> <span class="nf">_stop_api</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_api_proc</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_api_proc</span><span class="o">.</span><span class="n">terminate</span><span class="p">()</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_api_proc</span><span class="o">.</span><span class="n">join</span><span class="p">()</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_api_proc</span> <span class="o">=</span> <span class="kc">None</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_api_started</span><span class="o">.</span><span class="n">clear</span><span class="p">()</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_update_finalizer</span><span class="p">()</span>
+
+    <span class="k">def</span> <span class="nf">_start_compute</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">_compute_enabled</span><span class="p">:</span>
+            <span class="k">return</span>
+
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_compute_proc</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_compute_proc</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_mp_context</span><span class="o">.</span><span class="n">Process</span><span class="p">(</span>
+                <span class="n">target</span><span class="o">=</span><span class="n">_compute_process</span><span class="p">,</span> <span class="n">args</span><span class="o">=</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_compute_config</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_logging_queue</span><span class="p">)</span>
+            <span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_compute_proc</span><span class="o">.</span><span class="n">start</span><span class="p">()</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_update_finalizer</span><span class="p">()</span>
+
+    <span class="k">def</span> <span class="nf">_stop_compute</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_compute_proc</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_compute_proc</span><span class="o">.</span><span class="n">terminate</span><span class="p">()</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_compute_proc</span><span class="o">.</span><span class="n">join</span><span class="p">()</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_compute_proc</span> <span class="o">=</span> <span class="kc">None</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_update_finalizer</span><span class="p">()</span>
+
+    <span class="k">def</span> <span class="nf">_start_job_runner</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_job_runner_proc</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_job_runner_proc</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_mp_context</span><span class="o">.</span><span class="n">Process</span><span class="p">(</span>
+                <span class="n">target</span><span class="o">=</span><span class="n">_job_runner_process</span><span class="p">,</span> <span class="n">args</span><span class="o">=</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_qcf_config</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_logging_queue</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_finished_queue</span><span class="p">)</span>
+            <span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_job_runner_proc</span><span class="o">.</span><span class="n">start</span><span class="p">()</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_update_finalizer</span><span class="p">()</span>
+
+    <span class="k">def</span> <span class="nf">_stop_job_runner</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_job_runner_proc</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_job_runner_proc</span><span class="o">.</span><span class="n">terminate</span><span class="p">()</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_job_runner_proc</span><span class="o">.</span><span class="n">join</span><span class="p">()</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_job_runner_proc</span> <span class="o">=</span> <span class="kc">None</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_update_finalizer</span><span class="p">()</span>
+
     <span class="nd">@classmethod</span>
-    <span class="k">def</span> <span class="nf">_stop</span><span class="p">(</span><span class="bp">cls</span><span class="p">,</span> <span class="n">compute_proc</span><span class="p">,</span> <span class="n">flask_proc</span><span class="p">,</span> <span class="n">job_runner_proc</span><span class="p">):</span>
+    <span class="k">def</span> <span class="nf">_stop</span><span class="p">(</span><span class="bp">cls</span><span class="p">,</span> <span class="n">compute_proc</span><span class="p">,</span> <span class="n">api_proc</span><span class="p">,</span> <span class="n">job_runner_proc</span><span class="p">,</span> <span class="n">logging_thread</span><span class="p">,</span> <span class="n">logging_queue</span><span class="p">):</span>
         <span class="c1">####################################################################################</span>
         <span class="c1"># This is written as a class method so that it can be called by a weakref finalizer</span>
         <span class="c1">####################################################################################</span>
@@ -583,18 +715,31 @@ document.write(`
         <span class="c1"># Stop these in a particular order</span>
         <span class="c1"># First the compute, since it will communicate its demise to the api server</span>
         <span class="c1"># Flask must be last. It was started first and owns the db</span>
-        <span class="n">compute_proc</span><span class="o">.</span><span class="n">stop</span><span class="p">()</span>
-        <span class="n">job_runner_proc</span><span class="o">.</span><span class="n">stop</span><span class="p">()</span>
-        <span class="n">flask_proc</span><span class="o">.</span><span class="n">stop</span><span class="p">()</span>
 
-<div class="viewcode-block" id="FractalSnowflake.wait_for_flask"><a class="viewcode-back" href="../../overview/snowflake.html#qcfractal.snowflake.FractalSnowflake.wait_for_flask">[docs]</a>    <span class="k">def</span> <span class="nf">wait_for_flask</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="c1"># First, stop all, then join all for better performance</span>
+        <span class="k">if</span> <span class="n">compute_proc</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">compute_proc</span><span class="o">.</span><span class="n">terminate</span><span class="p">()</span>
+            <span class="n">compute_proc</span><span class="o">.</span><span class="n">join</span><span class="p">()</span>
+
+        <span class="k">if</span> <span class="n">job_runner_proc</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">job_runner_proc</span><span class="o">.</span><span class="n">terminate</span><span class="p">()</span>
+            <span class="n">job_runner_proc</span><span class="o">.</span><span class="n">join</span><span class="p">()</span>
+
+        <span class="k">if</span> <span class="n">api_proc</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">api_proc</span><span class="o">.</span><span class="n">terminate</span><span class="p">()</span>
+            <span class="n">api_proc</span><span class="o">.</span><span class="n">join</span><span class="p">()</span>
+
+        <span class="n">logging_queue</span><span class="o">.</span><span class="n">put</span><span class="p">(</span><span class="kc">None</span><span class="p">)</span>
+        <span class="n">logging_thread</span><span class="o">.</span><span class="n">join</span><span class="p">()</span>
+
+<div class="viewcode-block" id="FractalSnowflake.wait_for_api"><a class="viewcode-back" href="../../overview/snowflake.html#qcfractal.snowflake.FractalSnowflake.wait_for_api">[docs]</a>    <span class="k">def</span> <span class="nf">wait_for_api</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
-<span class="sd">        Wait for the flask server to come up and then exit</span>
+<span class="sd">        Wait for the flask/api server to come up and then exit</span>
 
 <span class="sd">        If it does not come up after some time, an exception will be raised</span>
 <span class="sd">        &quot;&quot;&quot;</span>
 
-        <span class="n">running</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_flask_started</span><span class="o">.</span><span class="n">wait</span><span class="p">(</span><span class="mf">10.0</span><span class="p">)</span>
+        <span class="n">running</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_api_started</span><span class="o">.</span><span class="n">wait</span><span class="p">(</span><span class="mf">10.0</span><span class="p">)</span>
         <span class="k">assert</span> <span class="n">running</span>
 
         <span class="c1"># Seems there still may be a small time after the event is triggered and before</span>
@@ -619,28 +764,26 @@ document.write(`
                 <span class="k">if</span> <span class="nb">iter</span> <span class="o">&gt;=</span> <span class="n">max_iter</span><span class="p">:</span>
                     <span class="k">raise</span></div>
 
-<div class="viewcode-block" id="FractalSnowflake.stop"><a class="viewcode-back" href="../../overview/snowflake.html#qcfractal.snowflake.FractalSnowflake.stop">[docs]</a>    <span class="k">def</span> <span class="nf">stop</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
-<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
-<span class="sd">        Stops the server</span>
-<span class="sd">        &quot;&quot;&quot;</span>
-
-        <span class="bp">self</span><span class="o">.</span><span class="n">_stop</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_compute_proc</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_flask_proc</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_job_runner_proc</span><span class="p">)</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">_flask_started</span><span class="o">.</span><span class="n">clear</span><span class="p">()</span></div>
-
 <div class="viewcode-block" id="FractalSnowflake.start"><a class="viewcode-back" href="../../overview/snowflake.html#qcfractal.snowflake.FractalSnowflake.start">[docs]</a>    <span class="k">def</span> <span class="nf">start</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
-<span class="sd">        Starts the server</span>
+<span class="sd">        Starts all the components of the snowflake</span>
 <span class="sd">        &quot;&quot;&quot;</span>
 
-        <span class="k">if</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">_flask_proc</span><span class="o">.</span><span class="n">is_alive</span><span class="p">():</span>
-            <span class="bp">self</span><span class="o">.</span><span class="n">_flask_proc</span><span class="o">.</span><span class="n">start</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_start_api</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_start_compute</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_start_job_runner</span><span class="p">()</span></div>
 
-        <span class="bp">self</span><span class="o">.</span><span class="n">wait_for_flask</span><span class="p">()</span>
+<div class="viewcode-block" id="FractalSnowflake.stop"><a class="viewcode-back" href="../../overview/snowflake.html#qcfractal.snowflake.FractalSnowflake.stop">[docs]</a>    <span class="k">def</span> <span class="nf">stop</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">        Stops all components of the snowflake</span>
+<span class="sd">        &quot;&quot;&quot;</span>
 
-        <span class="k">if</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">_job_runner_proc</span><span class="o">.</span><span class="n">is_alive</span><span class="p">():</span>
-            <span class="bp">self</span><span class="o">.</span><span class="n">_job_runner_proc</span><span class="o">.</span><span class="n">start</span><span class="p">()</span>
-        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_compute_workers</span> <span class="o">&gt;</span> <span class="mi">0</span> <span class="ow">and</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">_compute_proc</span><span class="o">.</span><span class="n">is_alive</span><span class="p">():</span>
-            <span class="bp">self</span><span class="o">.</span><span class="n">_compute_proc</span><span class="o">.</span><span class="n">start</span><span class="p">()</span></div>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_finalizer</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_finalizer</span><span class="p">()</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">_api_proc</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_compute_proc</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_job_runner_proc</span> <span class="o">=</span> <span class="kc">None</span></div>
 
 <div class="viewcode-block" id="FractalSnowflake.get_uri"><a class="viewcode-back" href="../../overview/snowflake.html#qcfractal.snowflake.FractalSnowflake.get_uri">[docs]</a>    <span class="k">def</span> <span class="nf">get_uri</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
@@ -679,11 +822,6 @@ document.write(`
 <span class="sd">        &quot;&quot;&quot;</span>
         <span class="n">logger</span> <span class="o">=</span> <span class="n">logging</span><span class="o">.</span><span class="n">getLogger</span><span class="p">(</span><span class="vm">__name__</span><span class="p">)</span>
 
-        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_finished_queue</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
-            <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span>
-                <span class="s2">&quot;Cannot wait for results when the completed queue is not enabled. See the &#39;enable_watching&#39; argument to the constructor&quot;</span>
-            <span class="p">)</span>
-
         <span class="k">if</span> <span class="n">ids</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
             <span class="n">c</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">client</span><span class="p">()</span>
             <span class="n">query_iter</span> <span class="o">=</span> <span class="n">c</span><span class="o">.</span><span class="n">query_records</span><span class="p">(</span><span class="n">status</span><span class="o">=</span><span class="p">[</span><span class="n">RecordStatusEnum</span><span class="o">.</span><span class="n">waiting</span><span class="p">,</span> <span class="n">RecordStatusEnum</span><span class="o">.</span><span class="n">running</span><span class="p">])</span>
@@ -703,10 +841,10 @@ document.write(`
             <span class="k">try</span><span class="p">:</span>
                 <span class="n">finished_id</span><span class="p">,</span> <span class="n">status</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_finished_queue</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="kc">True</span><span class="p">,</span> <span class="n">timeout</span><span class="p">)</span>
             <span class="k">except</span> <span class="n">Empty</span><span class="p">:</span>
-                <span class="n">logger</span><span class="o">.</span><span class="n">debug</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Not all tasks finished in </span><span class="si">{</span><span class="n">timeout</span><span class="si">}</span><span class="s2"> seconds&quot;</span><span class="p">)</span>
+                <span class="n">logger</span><span class="o">.</span><span class="n">debug</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Not all records finished in </span><span class="si">{</span><span class="n">timeout</span><span class="si">}</span><span class="s2"> seconds&quot;</span><span class="p">)</span>
                 <span class="k">return</span> <span class="kc">False</span>
 
-            <span class="n">logger</span><span class="o">.</span><span class="n">debug</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Task finished: id=</span><span class="si">{</span><span class="n">finished_id</span><span class="si">}</span><span class="s2">, status=</span><span class="si">{</span><span class="n">status</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+            <span class="n">logger</span><span class="o">.</span><span class="n">debug</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Record finished: id=</span><span class="si">{</span><span class="n">finished_id</span><span class="si">}</span><span class="s2">, status=</span><span class="si">{</span><span class="n">status</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
 
             <span class="c1"># Add it to the list of all completed results we have seen</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">_all_completed</span><span class="o">.</span><span class="n">add</span><span class="p">(</span><span class="n">finished_id</span><span class="p">)</span>
@@ -725,7 +863,10 @@ document.write(`
 <span class="sd">        Obtain a PortalClient connected to this server</span>
 <span class="sd">        &quot;&quot;&quot;</span>
 
-        <span class="k">return</span> <span class="n">PortalClient</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">get_uri</span><span class="p">())</span></div>
+        <span class="c1"># Shorten the timeout parameter - should be pretty quick in a snowflake</span>
+        <span class="n">c</span> <span class="o">=</span> <span class="n">PortalClient</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">get_uri</span><span class="p">())</span>
+        <span class="n">c</span><span class="o">.</span><span class="n">_timeout</span> <span class="o">=</span> <span class="mi">2</span>
+        <span class="k">return</span> <span class="n">c</span></div>
 
     <span class="k">def</span> <span class="fm">__enter__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
         <span class="k">return</span> <span class="bp">self</span>
@@ -802,7 +943,7 @@ document.write(`
  
         
         <p class="sphinx-version">
-        Created using <a href="http://sphinx-doc.org/">Sphinx</a> 5.3.0.<br>
+        Created using <a href="http://sphinx-doc.org/">Sphinx</a> 6.2.1.<br>
         </p>
         
 
